@@ -20,7 +20,7 @@ const {
     tenantGuard,
     installGracefulShutdown,
 } = require('./common');
-const { spawn, exec } = require('child_process');
+const { execFile } = require('child_process');
 const fs = require('fs').promises;
 const path = require('path');
 const crypto = require('crypto');
@@ -180,7 +180,7 @@ async function analyzeVulnerablePackages(projectPath, { offline = isOfflineNuGet
         return { success: false, skipped: true, reason: OFFLINE_PACKAGE_ANALYSIS_REASON, output: '', errors: '' };
     }
 
-    const result = await executeCommand('dotnet list package --vulnerable', { cwd: projectPath });
+    const result = await executeCommand(['dotnet', 'list', 'package', '--vulnerable'], { cwd: projectPath });
 
     if (!result.success && isDivideByZeroCrash(result)) {
         log.warn('Vulnerable-package scan crashed inside the .NET SDK; reporting it as unavailable');
@@ -201,7 +201,7 @@ async function analyzeOutdatedPackages(projectPath, { offline = isOfflineNuGet()
         return { success: false, skipped: true, reason: OFFLINE_PACKAGE_ANALYSIS_REASON, output: '', errors: '' };
     }
 
-    const result = await executeCommand('dotnet outdated', { cwd: projectPath });
+    const result = await executeCommand(['dotnet', 'outdated'], { cwd: projectPath });
 
     if (!result.success && isMissingToolError(result)) {
         log.warn('dotnet-outdated is not installed; reporting outdated-package analysis as unavailable');
@@ -218,16 +218,37 @@ async function analyzeOutdatedPackages(projectPath, { offline = isOfflineNuGet()
 }
 
 /**
- * Utility function to execute shell commands with timeout
+ * Utility function to execute a command with timeout, WITHOUT a shell.
+ *
+ * `argv` is an argument vector: `['dotnet', 'build', '--no-restore']`. The file is
+ * spawned directly, so no element is ever interpreted by /bin/sh — a request field
+ * such as `projectType` can at worst reach `dotnet` as one literal argument, never
+ * become a second command. This replaced `exec(command)` (a shell string built by
+ * interpolation) after CodeQL flagged js/command-line-injection on the
+ * request-derived arguments in /execute, /validate and /run-command.
  */
-function executeCommand(command, options = {}) {
+function executeCommand(argv, options = {}) {
     return new Promise((resolve) => {
         const timeout = options.timeout || EXECUTION_TIMEOUT;
         const cwd = options.cwd || TEST_WORKSPACE;
         let isResolved = false;
-        
-        log.debug(`Executing command: ${command}`, { cwd, timeout });
-        
+
+        if (!Array.isArray(argv) || argv.length === 0) {
+            resolve({
+                success: false,
+                error: 'executeCommand requires a non-empty argv array',
+                stdout: '',
+                stderr: 'executeCommand requires a non-empty argv array',
+                exitCode: 1
+            });
+            return;
+        }
+
+        const [file, ...args] = argv;
+        const commandLine = argv.join(' ');
+
+        log.debug(`Executing command: ${commandLine}`, { cwd, timeout });
+
         // Set up environment for .NET.
         //
         // DOTNET_ROOT and the /root/.dotnet PATH prefix used to be hardcoded here.
@@ -243,18 +264,18 @@ function executeCommand(command, options = {}) {
             DOTNET_CLI_TELEMETRY_OPTOUT: '1'
         };
         
-        const child = exec(command, { 
-            cwd, 
+        const child = execFile(file, args, {
+            cwd,
             maxBuffer: 20 * 1024 * 1024, // 20MB buffer
             timeout,
             env
         }, (error, stdout, stderr) => {
             if (isResolved) return;
             isResolved = true;
-            
+
             if (error) {
                 // Don't treat all non-zero exits as failures (tests might fail)
-                log.debug(`Command completed with exit code: ${error.code}`, { command });
+                log.debug(`Command completed with exit code: ${error.code}`, { command: commandLine });
                 resolve({
                     success: error.code === 0,
                     stdout,
@@ -262,7 +283,7 @@ function executeCommand(command, options = {}) {
                     exitCode: error.code ?? 1
                 });
             } else {
-                log.debug(`Command completed successfully: ${command}`);
+                log.debug(`Command completed successfully: ${commandLine}`);
                 resolve({
                     success: true,
                     stdout,
@@ -666,21 +687,22 @@ app.post('/execute', async (req, res) => {
         // discarded here because executeCommand resolves rather than throws.
         // Surface the first failure with its own stderr instead.
         const scaffoldSteps = [
-            ['solution', `dotnet new sln -n ${projectName}`],
-            ['core project', `dotnet new ${projectType} -n ${coreProjectName} --framework ${targetFramework}`],
+            ['solution', ['dotnet', 'new', 'sln', '-n', projectName]],
+            ['core project', ['dotnet', 'new', projectType, '-n', coreProjectName, '--framework', targetFramework]],
         ];
         const testTemplate = framework === 'nunit' ? 'nunit' : framework === 'mstest' ? 'mstest' : 'xunit';
-        scaffoldSteps.push(['test project', `dotnet new ${testTemplate} -n ${testProjectName} --framework ${targetFramework}`]);
+        scaffoldSteps.push(['test project', ['dotnet', 'new', testTemplate, '-n', testProjectName, '--framework', targetFramework]]);
 
         for (const [label, command] of scaffoldSteps) {
+            const commandLine = command.join(' ');
             const result = await executeCommand(command, { cwd: projectPath });
             if (!result.success) {
-                log.error(`Scaffolding failed (${label}): ${executionId}`, { command, exitCode: result.exitCode });
+                log.error(`Scaffolding failed (${label}): ${executionId}`, { command: commandLine, exitCode: result.exitCode });
                 return res.status(500).json({
                     executionId,
                     success: false,
                     error: `Failed to scaffold ${label}`,
-                    command,
+                    command: commandLine,
                     exitCode: result.exitCode,
                     output: result.stdout,
                     errors: result.stderr,
@@ -695,20 +717,21 @@ app.post('/execute', async (req, res) => {
         // the core project, and a build that still succeeds (because the tests
         // never referenced it) reported success:true. Fail loud instead.
         const wiringSteps = [
-            ['add core project to solution', `dotnet sln add ${coreProjectName}/${coreProjectName}.csproj`],
-            ['add test project to solution', `dotnet sln add ${testProjectName}/${testProjectName}.csproj`],
-            ['add project reference', `dotnet add ${testProjectName}/${testProjectName}.csproj reference ${coreProjectName}/${coreProjectName}.csproj`],
+            ['add core project to solution', ['dotnet', 'sln', 'add', `${coreProjectName}/${coreProjectName}.csproj`]],
+            ['add test project to solution', ['dotnet', 'sln', 'add', `${testProjectName}/${testProjectName}.csproj`]],
+            ['add project reference', ['dotnet', 'add', `${testProjectName}/${testProjectName}.csproj`, 'reference', `${coreProjectName}/${coreProjectName}.csproj`]],
         ];
 
         for (const [label, command] of wiringSteps) {
+            const commandLine = command.join(' ');
             const result = await executeCommand(command, { cwd: projectPath });
             if (!result.success) {
-                log.error(`Project wiring failed (${label}): ${executionId}`, { command, exitCode: result.exitCode });
+                log.error(`Project wiring failed (${label}): ${executionId}`, { command: commandLine, exitCode: result.exitCode });
                 return res.status(500).json({
                     executionId,
                     success: false,
                     error: `Failed to ${label}`,
-                    command,
+                    command: commandLine,
                     exitCode: result.exitCode,
                     output: result.stdout,
                     errors: result.stderr,
@@ -742,7 +765,8 @@ app.post('/execute', async (req, res) => {
         // succeed against code that does not yet use the package, and the caller
         // got success:true for a run whose declared dependency was never installed.
         for (const [packageName, version] of Object.entries(dependencies)) {
-            const command = `dotnet add ${coreProjectName}/${coreProjectName}.csproj package ${packageName} --version ${version}`;
+            const command = ['dotnet', 'add', `${coreProjectName}/${coreProjectName}.csproj`, 'package', packageName, '--version', version];
+            const commandLine = command.join(' ');
             const result = await executeCommand(command, { cwd: projectPath });
             if (!result.success) {
                 log.error(`Dependency install failed: ${executionId}`, { packageName, version, exitCode: result.exitCode });
@@ -750,7 +774,7 @@ app.post('/execute', async (req, res) => {
                     executionId,
                     success: false,
                     error: `Failed to add dependency ${packageName}@${version}`,
-                    command,
+                    command: commandLine,
                     exitCode: result.exitCode,
                     output: result.stdout,
                     errors: result.stderr,
@@ -784,7 +808,7 @@ app.post('/execute', async (req, res) => {
         
         // Step 1: Restore packages
         log.info(`Restoring NuGet packages: ${executionId}`);
-        const restoreResult = await executeCommand('dotnet restore', { cwd: projectPath });
+        const restoreResult = await executeCommand(['dotnet', 'restore'], { cwd: projectPath });
         
         results.restore = {
             success: restoreResult.success,
@@ -799,7 +823,7 @@ app.post('/execute', async (req, res) => {
         
         // Step 2: Build the solution
         log.info(`Building C# solution: ${executionId}`);
-        const buildResult = await executeCommand('dotnet build --no-restore', { cwd: projectPath });
+        const buildResult = await executeCommand(['dotnet', 'build', '--no-restore'], { cwd: projectPath });
         
         results.compilation = {
             success: buildResult.success,
@@ -815,9 +839,9 @@ app.post('/execute', async (req, res) => {
         
         // Step 3: Run tests
         log.info(`Running C# tests: ${executionId}`);
-        const testCommand = options.generateCoverage !== false 
-            ? 'dotnet test --no-build --collect:"XPlat Code Coverage"'
-            : 'dotnet test --no-build';
+        const testCommand = options.generateCoverage !== false
+            ? ['dotnet', 'test', '--no-build', '--collect:XPlat Code Coverage']
+            : ['dotnet', 'test', '--no-build'];
             
         const testResult = await executeCommand(testCommand, { cwd: projectPath });
         
@@ -877,7 +901,7 @@ app.post('/execute', async (req, res) => {
         if (options.checkFormatting !== false) {
             log.info(`Checking code formatting: ${executionId}`);
             try {
-                const formatResult = await executeCommand('dotnet format --verify-no-changes --verbosity normal', { cwd: projectPath });
+                const formatResult = await executeCommand(['dotnet', 'format', '--verify-no-changes', '--verbosity', 'normal'], { cwd: projectPath });
                 
                 results.formatting = {
                     success: formatResult.success,
@@ -1107,14 +1131,14 @@ app.post('/validate', async (req, res) => {
         await fs.mkdir(tempPath, { recursive: true });
         
         // Create project
-        await executeCommand(`dotnet new ${projectType} --framework ${targetFramework}`, { cwd: tempPath });
+        await executeCommand(['dotnet', 'new', projectType, '--framework', targetFramework], { cwd: tempPath });
         
         // Write the code
         const mainFile = projectType === 'console' ? 'Program.cs' : 'Class1.cs';
         await fs.writeFile(path.join(tempPath, mainFile), code);
         
         // Try to build the project
-        const buildResult = await executeCommand('dotnet build', { cwd: tempPath });
+        const buildResult = await executeCommand(['dotnet', 'build'], { cwd: tempPath });
         
         // Clean up
         await fs.rmdir(tempPath, { recursive: true });
@@ -1181,10 +1205,18 @@ app.post('/run-command', async (req, res) => {
         }
         
         const actualCommand = DOTNET_COMMANDS[command] || command;
-        const fullCommand = cmdArgs.length > 0 ? `${actualCommand} ${cmdArgs.join(' ')}` : actualCommand;
-        
+        // Parse the command into an argv vector and append the caller's arguments
+        // as SEPARATE elements. execFile never invokes a shell, so an argument
+        // containing `;`, `$()` or backticks reaches `dotnet` as literal text
+        // rather than being interpreted as a second command.
+        const argv = actualCommand.trim().split(/\s+/);
+        for (const arg of cmdArgs) {
+            argv.push(String(arg));
+        }
+        const fullCommand = argv.join(' ');
+
         const workingDir = projectPath || TEST_WORKSPACE;
-        const result = await executeCommand(fullCommand, { cwd: workingDir });
+        const result = await executeCommand(argv, { cwd: workingDir });
         
         res.json({
             commandId,

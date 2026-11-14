@@ -5,7 +5,7 @@ jest.mock('child_process', () => {
     const original = jest.requireActual('child_process');
     return {
         ...original,
-        exec: jest.fn()
+        execFile: jest.fn()
     };
 });
 
@@ -26,13 +26,13 @@ jest.mock('fs', () => {
     };
 });
 
-const { exec } = require('child_process');
+const { execFile } = require('child_process');
 const { app } = require('../../src/csharp_test_service');
 
 // Helper to set up exec mock to simulate command results
 function mockExecSequence(results) {
     let callIndex = 0;
-    exec.mockImplementation((cmd, opts, cb) => {
+    execFile.mockImplementation((file, args, opts, cb) => {
         const result = callIndex < results.length
             ? results[callIndex]
             : { stdout: '', stderr: '', error: null };
@@ -102,7 +102,7 @@ describe('POST /execute', () => {
         expect(res.body.restore).toBeNull();
         expect(res.body.compilation).toBeNull();
         expect(res.body.success).toBe(false);
-        expect(exec).not.toHaveBeenCalled();
+        expect(execFile).not.toHaveBeenCalled();
     });
 
     // CHANGED (was: 'probe path reports zero tests even when testCode is
@@ -118,8 +118,8 @@ describe('POST /execute', () => {
             .send({ code: '// test', testCode: 'some test code' });
 
         expect(res.status).toBe(200);
-        expect(exec).toHaveBeenCalled();
-        expect(exec.mock.calls.some((c) => c[0].startsWith('dotnet test'))).toBe(true);
+        expect(execFile).toHaveBeenCalled();
+        expect(execFile.mock.calls.some((c) => [c[0], ...c[1]].join(' ').startsWith('dotnet test'))).toBe(true);
         expect(res.body.skipped).toBeUndefined();
         expect(res.body.noTestsRun).toBeUndefined();
         expect(res.body.reason).toBeUndefined();
@@ -302,10 +302,10 @@ describe('POST /execute', () => {
 
         expect(res.status).toBe(200);
         // Verify dotnet add package was called
-        const addPackageCall = exec.mock.calls.find(call => call[0].includes('dotnet add') && call[0].includes('package'));
+        const addPackageCall = execFile.mock.calls.find(call => [call[0], ...call[1]].join(' ').includes('dotnet add') && call[1].includes('package'));
         expect(addPackageCall).toBeDefined();
-        expect(addPackageCall[0]).toContain('Newtonsoft.Json');
-        expect(addPackageCall[0]).toContain('13.0.3');
+        expect(addPackageCall[1].join(' ')).toContain('Newtonsoft.Json');
+        expect(addPackageCall[1].join(' ')).toContain('13.0.3');
     });
 
     test('nunit framework uses nunit template', async () => {
@@ -321,8 +321,8 @@ describe('POST /execute', () => {
 
         expect(res.status).toBe(200);
         // The third exec call should use nunit template
-        const templateCall = exec.mock.calls[2];
-        expect(templateCall[0]).toContain('dotnet new nunit');
+        const templateCall = execFile.mock.calls[2];
+        expect([templateCall[0], ...templateCall[1]].join(' ')).toContain('dotnet new nunit');
     });
 
     test('mstest framework uses mstest template', async () => {
@@ -337,8 +337,8 @@ describe('POST /execute', () => {
             });
 
         expect(res.status).toBe(200);
-        const templateCall = exec.mock.calls[2];
-        expect(templateCall[0]).toContain('dotnet new mstest');
+        const templateCall = execFile.mock.calls[2];
+        expect([templateCall[0], ...templateCall[1]].join(' ')).toContain('dotnet new mstest');
     });
 
     test('coverage reading when TestResults directory has coverage file', async () => {
@@ -429,8 +429,8 @@ describe('POST /execute', () => {
         expect(res.status).toBe(200);
         expect(res.body.coverage).toBeNull();
         // Verify test command doesn't include coverage flag
-        const testCall = exec.mock.calls.find(call => call[0].includes('dotnet test'));
-        expect(testCall[0]).not.toContain('--collect');
+        const testCall = execFile.mock.calls.find(call => [call[0], ...call[1]].join(' ').includes('dotnet test'));
+        expect([testCall[0], ...testCall[1]].join(' ')).not.toContain('--collect');
     });
 
     test('options.checkFormatting=false skips formatting step', async () => {

@@ -5,15 +5,15 @@ jest.mock('child_process', () => {
     const original = jest.requireActual('child_process');
     return {
         ...original,
-        exec: jest.fn()
+        execFile: jest.fn()
     };
 });
 
-const { exec } = require('child_process');
+const { execFile } = require('child_process');
 const { app } = require('../../src/csharp_test_service');
 
 function mockExec(result) {
-    exec.mockImplementation((cmd, opts, cb) => {
+    execFile.mockImplementation((file, args, opts, cb) => {
         const child = { killed: false, kill: jest.fn() };
         process.nextTick(() => {
             if (result.error) {
@@ -88,8 +88,8 @@ describe('POST /run-command', () => {
 
         expect(res.status).toBe(200);
         // Verify cwd was set to the custom path
-        const execCall = exec.mock.calls[0];
-        expect(execCall[1].cwd).toBe('/custom/project');
+        const execCall = execFile.mock.calls[0];
+        expect(execCall[2].cwd).toBe('/custom/project');
     });
 
     test('command failure returns success:false with stderr', async () => {

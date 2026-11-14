@@ -5,7 +5,7 @@ jest.mock('child_process', () => {
     const original = jest.requireActual('child_process');
     return {
         ...original,
-        exec: jest.fn()
+        execFile: jest.fn()
     };
 });
 
@@ -26,12 +26,12 @@ jest.mock('fs', () => {
     };
 });
 
-const { exec } = require('child_process');
+const { execFile } = require('child_process');
 const { app } = require('../../src/csharp_test_service');
 
 function mockExecSequence(results) {
     let callIndex = 0;
-    exec.mockImplementation((cmd, opts, cb) => {
+    execFile.mockImplementation((file, args, opts, cb) => {
         const result = callIndex < results.length
             ? results[callIndex]
             : { stdout: '', stderr: '', error: null };
@@ -191,8 +191,8 @@ describe('POST /validate', () => {
 
         expect(res.status).toBe(200);
         // Verify the first exec call used classlib template
-        const newProjectCall = exec.mock.calls[0];
-        expect(newProjectCall[0]).toContain('dotnet new classlib');
+        const newProjectCall = execFile.mock.calls[0];
+        expect([newProjectCall[0], ...newProjectCall[1]].join(' ')).toContain('dotnet new classlib');
     });
 
     test('custom targetFramework is passed to dotnet new', async () => {
@@ -206,8 +206,8 @@ describe('POST /validate', () => {
             .send({ code: 'public class Lib {}', targetFramework: 'net6.0' });
 
         expect(res.status).toBe(200);
-        const newProjectCall = exec.mock.calls[0];
-        expect(newProjectCall[0]).toContain('net6.0');
+        const newProjectCall = execFile.mock.calls[0];
+        expect([newProjectCall[0], ...newProjectCall[1]].join(' ')).toContain('net6.0');
     });
 
     test('validate response includes output field', async () => {

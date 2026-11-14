@@ -3,11 +3,11 @@ jest.mock('child_process', () => {
     const original = jest.requireActual('child_process');
     return {
         ...original,
-        exec: jest.fn()
+        execFile: jest.fn()
     };
 });
 
-const { exec } = require('child_process');
+const { execFile } = require('child_process');
 const { executeCommand } = require('../../src/csharp_test_service');
 
 beforeEach(() => {
@@ -21,13 +21,13 @@ afterEach(() => {
 
 describe('executeCommand', () => {
     test('successful command returns correct stdout, stderr, exitCode', async () => {
-        exec.mockImplementation((cmd, opts, cb) => {
+        execFile.mockImplementation((file, args, opts, cb) => {
             const child = { killed: false, kill: jest.fn() };
             process.nextTick(() => cb(null, 'hello output', 'some warning'));
             return child;
         });
 
-        const promise = executeCommand('echo hello');
+        const promise = executeCommand(['echo', 'hello']);
         jest.advanceTimersByTime(0);
         // Let process.nextTick fire
         await jest.advanceTimersByTimeAsync(1);
@@ -40,13 +40,13 @@ describe('executeCommand', () => {
     });
 
     test('failed command returns correct error info', async () => {
-        exec.mockImplementation((cmd, opts, cb) => {
+        execFile.mockImplementation((file, args, opts, cb) => {
             const child = { killed: false, kill: jest.fn() };
             process.nextTick(() => cb({ code: 2 }, 'partial output', 'error details'));
             return child;
         });
 
-        const promise = executeCommand('false');
+        const promise = executeCommand(['false']);
         await jest.advanceTimersByTimeAsync(1);
         const result = await promise;
 
@@ -57,13 +57,13 @@ describe('executeCommand', () => {
     });
 
     test('error with no code defaults exitCode to 1', async () => {
-        exec.mockImplementation((cmd, opts, cb) => {
+        execFile.mockImplementation((file, args, opts, cb) => {
             const child = { killed: false, kill: jest.fn() };
             process.nextTick(() => cb({ code: undefined }, '', 'error'));
             return child;
         });
 
-        const promise = executeCommand('badcmd');
+        const promise = executeCommand(['badcmd']);
         await jest.advanceTimersByTimeAsync(1);
         const result = await promise;
 
@@ -73,13 +73,13 @@ describe('executeCommand', () => {
 
     test('error with code 0 reports success as true', async () => {
         // Odd case: error object present but code is 0
-        exec.mockImplementation((cmd, opts, cb) => {
+        execFile.mockImplementation((file, args, opts, cb) => {
             const child = { killed: false, kill: jest.fn() };
             process.nextTick(() => cb({ code: 0 }, 'output', ''));
             return child;
         });
 
-        const promise = executeCommand('weird');
+        const promise = executeCommand(['weird']);
         await jest.advanceTimersByTimeAsync(1);
         const result = await promise;
 
@@ -89,11 +89,11 @@ describe('executeCommand', () => {
 
     test('timeout triggers SIGTERM and returns timeout result', async () => {
         const killFn = jest.fn();
-        exec.mockImplementation(() => {
+        execFile.mockImplementation(() => {
             return { killed: false, kill: killFn };
         });
 
-        const promise = executeCommand('sleep 999', { timeout: 1000 });
+        const promise = executeCommand(['sleep', '999'], { timeout: 1000 });
 
         // Advance past the timeout
         jest.advanceTimersByTime(1001);
@@ -114,7 +114,7 @@ describe('executeCommand', () => {
     // container has readOnlyRootFilesystem. It passed for the same reason the
     // service was broken: it checked what the code did, not what the image is.
     test('no /root path is injected into the dotnet child environment', async () => {
-        exec.mockImplementation((cmd, opts, cb) => {
+        execFile.mockImplementation((file, args, opts, cb) => {
             const child = { killed: false, kill: jest.fn() };
             // Verify env in opts
             expect(opts.env.DOTNET_CLI_TELEMETRY_OPTOUT).toBe('1');
@@ -124,47 +124,47 @@ describe('executeCommand', () => {
             return child;
         });
 
-        const promise = executeCommand('dotnet --version');
+        const promise = executeCommand(['dotnet', '--version']);
         await jest.advanceTimersByTimeAsync(1);
         await promise;
     });
 
     test('custom cwd is passed to exec', async () => {
-        exec.mockImplementation((cmd, opts, cb) => {
+        execFile.mockImplementation((file, args, opts, cb) => {
             const child = { killed: false, kill: jest.fn() };
             expect(opts.cwd).toBe('/custom/path');
             process.nextTick(() => cb(null, '', ''));
             return child;
         });
 
-        const promise = executeCommand('ls', { cwd: '/custom/path' });
+        const promise = executeCommand(['ls'], { cwd: '/custom/path' });
         await jest.advanceTimersByTimeAsync(1);
         await promise;
     });
 
     test('maxBuffer is set to 20MB', async () => {
-        exec.mockImplementation((cmd, opts, cb) => {
+        execFile.mockImplementation((file, args, opts, cb) => {
             const child = { killed: false, kill: jest.fn() };
             expect(opts.maxBuffer).toBe(20 * 1024 * 1024);
             process.nextTick(() => cb(null, '', ''));
             return child;
         });
 
-        const promise = executeCommand('echo test');
+        const promise = executeCommand(['echo', 'test']);
         await jest.advanceTimersByTimeAsync(1);
         await promise;
     });
 
     test('already killed child does not resolve twice on timeout', async () => {
         const killFn = jest.fn();
-        exec.mockImplementation((cmd, opts, cb) => {
+        execFile.mockImplementation((file, args, opts, cb) => {
             const child = { killed: false, kill: killFn };
             // Command completes before timeout
             process.nextTick(() => cb(null, 'done', ''));
             return child;
         });
 
-        const promise = executeCommand('fast cmd', { timeout: 5000 });
+        const promise = executeCommand(['fast', 'cmd'], { timeout: 5000 });
         await jest.advanceTimersByTimeAsync(1);
         const result = await promise;
 
