@@ -12,7 +12,7 @@ jest.mock('child_process', () => {
     const original = jest.requireActual('child_process');
     return {
         ...original,
-        exec: jest.fn()
+        execFile: jest.fn()
     };
 });
 
@@ -32,12 +32,12 @@ jest.mock('fs', () => {
     };
 });
 
-const { exec } = require('child_process');
+const { execFile } = require('child_process');
 const { app } = require('../../src/csharp_test_service');
 
 function mockExecSequence(results) {
     let callIndex = 0;
-    exec.mockImplementation((cmd, opts, cb) => {
+    execFile.mockImplementation((file, args, opts, cb) => {
         const result = callIndex < results.length
             ? results[callIndex]
             : { stdout: '', stderr: '', error: null };
@@ -88,8 +88,8 @@ describe('/execute never reports a pass it did not run', () => {
         expect(res.status).toBe(200);
         // The load-bearing assertion: dotnet was invoked. The old code returned
         // `passed: 1` with exec never called.
-        expect(exec).toHaveBeenCalled();
-        const commands = exec.mock.calls.map((c) => c[0]);
+        expect(execFile).toHaveBeenCalled();
+        const commands = execFile.mock.calls.map((c) => [c[0], ...c[1]].join(' '));
         expect(commands.some((c) => c.startsWith('dotnet test'))).toBe(true);
 
         expect(res.body.output).not.toBe('Fast-path response for minimal test');
@@ -126,7 +126,7 @@ describe('/execute never reports a pass it did not run', () => {
             .send({ code: '// test' });
 
         expect(res.status).toBe(200);
-        expect(exec).not.toHaveBeenCalled();
+        expect(execFile).not.toHaveBeenCalled();
 
         expect(res.body.noTestsRun).toBe(true);
         expect(res.body.skipped).toBe(true);
@@ -153,8 +153,8 @@ describe('/execute never reports a pass it did not run', () => {
         expect(res.status).toBe(200);
         // The suite must actually run. Previously exec was never called and the
         // caller's tests were silently dropped with a 200 and no error.
-        expect(exec).toHaveBeenCalled();
-        const commands = exec.mock.calls.map((c) => c[0]);
+        expect(execFile).toHaveBeenCalled();
+        const commands = execFile.mock.calls.map((c) => [c[0], ...c[1]].join(' '));
         expect(commands.some((c) => c.startsWith('dotnet test'))).toBe(true);
         expect(res.body.skipped).toBeUndefined();
         expect(res.body.noTestsRun).toBeUndefined();

@@ -7,16 +7,16 @@ jest.mock('child_process', () => {
     const original = jest.requireActual('child_process');
     return {
         ...original,
-        exec: jest.fn()
+        execFile: jest.fn()
     };
 });
 
-const { exec } = require('child_process');
+const { execFile } = require('child_process');
 const { executeCommand, ensureOfflineNuGetConfig } = require('../../src/csharp_test_service');
 
 function mockExecSequence(results) {
     let callIndex = 0;
-    exec.mockImplementation((cmd, opts, cb) => {
+    execFile.mockImplementation((file, args, opts, cb) => {
         const result = callIndex < results.length
             ? results[callIndex]
             : { stdout: '', stderr: '', error: null };
@@ -46,9 +46,9 @@ beforeEach(() => {
 describe('dotnet environment is inherited, not hardcoded to /root', () => {
     test('no /root path is injected into the child environment', async () => {
         mockExecSequence([{ stdout: 'ok', stderr: '', error: null }]);
-        await executeCommand('dotnet --version');
+        await executeCommand(['dotnet', '--version']);
 
-        const opts = exec.mock.calls[0][1];
+        const opts = execFile.mock.calls[0][2];
         expect(opts.env.DOTNET_CLI_TELEMETRY_OPTOUT).toBe('1');
         expect(opts.env.DOTNET_ROOT).toBeUndefined();
         expect(opts.env.PATH).not.toContain('/root/.dotnet');
@@ -59,8 +59,8 @@ describe('dotnet environment is inherited, not hardcoded to /root', () => {
         process.env.DOTNET_ROOT = '/usr/share/dotnet';
         try {
             mockExecSequence([{ stdout: 'ok', stderr: '', error: null }]);
-            await executeCommand('dotnet --version');
-            expect(exec.mock.calls[0][1].env.DOTNET_ROOT).toBe('/usr/share/dotnet');
+            await executeCommand(['dotnet', '--version']);
+            expect(execFile.mock.calls[0][2].env.DOTNET_ROOT).toBe('/usr/share/dotnet');
         } finally {
             if (previous === undefined) delete process.env.DOTNET_ROOT;
             else process.env.DOTNET_ROOT = previous;

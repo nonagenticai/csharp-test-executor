@@ -8,7 +8,7 @@
 # service. One artefact to publish, nothing to pin.
 FROM docker.io/library/node:26-alpine AS nodebase
 
-FROM docker.io/dotnet/sdk:8.0-alpine AS toolchain
+FROM mcr.microsoft.com/dotnet/sdk:8.0-alpine AS toolchain
 
 COPY --from=nodebase /usr/local/bin/node /usr/local/bin/node
 COPY --from=nodebase /usr/local/lib/node_modules /usr/local/lib/node_modules

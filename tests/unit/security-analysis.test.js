@@ -15,7 +15,7 @@ const request = require('supertest');
 
 jest.mock('child_process', () => {
     const original = jest.requireActual('child_process');
-    return { ...original, exec: jest.fn() };
+    return { ...original, execFile: jest.fn() };
 });
 
 jest.mock('fs', () => {
@@ -34,7 +34,7 @@ jest.mock('fs', () => {
     };
 });
 
-const { exec } = require('child_process');
+const { execFile } = require('child_process');
 const { app } = require('../../src/csharp_test_service');
 
 const DIVIDE_BY_ZERO = [
@@ -46,7 +46,8 @@ const DIVIDE_BY_ZERO = [
 // order, so a step that is legitimately SKIPPED does not shift every later
 // result the way an index-based sequence would.
 function mockExecByCommand(overrides = {}) {
-    exec.mockImplementation((cmd, opts, cb) => {
+    execFile.mockImplementation((file, args, opts, cb) => {
+        const cmd = [file, ...args].join(' ');
         const key = Object.keys(overrides).find((k) => cmd.includes(k));
         const result = key
             ? overrides[key]
@@ -65,7 +66,7 @@ function mockExecByCommand(overrides = {}) {
 }
 
 function execCommands() {
-    return exec.mock.calls.map((c) => c[0]);
+    return execFile.mock.calls.map((c) => [c[0], ...c[1]].join(' '));
 }
 
 function runExecute() {
