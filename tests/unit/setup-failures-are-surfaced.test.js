@@ -5,7 +5,7 @@ jest.mock('child_process', () => {
     const original = jest.requireActual('child_process');
     return {
         ...original,
-        exec: jest.fn()
+        execFile: jest.fn()
     };
 });
 
@@ -27,12 +27,12 @@ jest.mock('fs', () => {
     };
 });
 
-const { exec } = require('child_process');
+const { execFile } = require('child_process');
 const { app } = require('../../src/csharp_test_service');
 
 function mockExecSequence(results) {
     let callIndex = 0;
-    exec.mockImplementation((cmd, opts, cb) => {
+    execFile.mockImplementation((file, args, opts, cb) => {
         const result = callIndex < results.length
             ? results[callIndex]
             : { stdout: '', stderr: '', error: null };
@@ -96,7 +96,7 @@ describe('project wiring and dependency failures are surfaced', () => {
         expect(res.body.errors).toContain('Reference could not be added.');
         // The run must stop here: nothing may be built or tested on a project
         // whose test assembly cannot see the code under test.
-        expect(exec.mock.calls.some((c) => c[0].startsWith('dotnet test'))).toBe(false);
+        expect(execFile.mock.calls.some((c) => [c[0], ...c[1]].join(' ').startsWith('dotnet test'))).toBe(false);
     });
 
     test('a failing `dotnet add package` is reported, never a success with a missing dep', async () => {
@@ -120,6 +120,6 @@ describe('project wiring and dependency failures are surfaced', () => {
         expect(res.body.errors).toContain('NU1101');
         // Previously the build ran anyway and, because nothing referenced the
         // package yet, succeeded -> success:true with the dependency absent.
-        expect(exec.mock.calls.some((c) => c[0].startsWith('dotnet build'))).toBe(false);
+        expect(execFile.mock.calls.some((c) => [c[0], ...c[1]].join(' ').startsWith('dotnet build'))).toBe(false);
     });
 });

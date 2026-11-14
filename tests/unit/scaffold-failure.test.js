@@ -5,7 +5,7 @@ jest.mock('child_process', () => {
     const original = jest.requireActual('child_process');
     return {
         ...original,
-        exec: jest.fn()
+        execFile: jest.fn()
     };
 });
 
@@ -27,12 +27,12 @@ jest.mock('fs', () => {
     };
 });
 
-const { exec } = require('child_process');
+const { execFile } = require('child_process');
 const { app } = require('../../src/csharp_test_service');
 
 function mockExecSequence(results) {
     let callIndex = 0;
-    exec.mockImplementation((cmd, opts, cb) => {
+    execFile.mockImplementation((file, args, opts, cb) => {
         const result = callIndex < results.length
             ? results[callIndex]
             : { stdout: '', stderr: '', error: null };
