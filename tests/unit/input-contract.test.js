@@ -172,16 +172,14 @@ describe('POST /run-command input contract', () => {
         expect(execFile).not.toHaveBeenCalled();
     });
 
-    test('valid raw dotnet command still executes', async () => {
-        mockExecSequence([{ stdout: '8.0.100', stderr: '', error: null }]);
-
+    test('a raw dotnet command string is refused, not executed', async () => {
         const res = await request(app)
             .post('/run-command')
             .send({ command: 'dotnet --version' });
 
-        expect(res.status).toBe(200);
-        expect(res.body.command).toBe('dotnet --version');
-        expect(execFile).toHaveBeenCalledTimes(1);
+        expect(res.status).toBe(400);
+        expect(res.body.error).toContain('Unsupported command');
+        expect(execFile).not.toHaveBeenCalled();
     });
 });
 

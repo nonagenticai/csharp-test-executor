@@ -57,16 +57,14 @@ describe('POST /run-command', () => {
         expect(res.body.command).toBe('dotnet test --no-build --verbosity detailed');
     });
 
-    test('raw dotnet command (starts with "dotnet ") is accepted', async () => {
-        mockExec({ stdout: '8.0.100', stderr: '', error: null });
-
+    test('raw dotnet command strings are refused: only the fixed map executes', async () => {
         const res = await request(app)
             .post('/run-command')
             .send({ command: 'dotnet --version' });
 
-        expect(res.status).toBe(200);
-        expect(res.body.command).toBe('dotnet --version');
-        expect(res.body.output).toBe('8.0.100');
+        expect(res.status).toBe(400);
+        expect(res.body.error).toContain('Unsupported command');
+        expect(execFile).not.toHaveBeenCalled();
     });
 
     test('unsupported command returns 400', async () => {
@@ -79,17 +77,39 @@ describe('POST /run-command', () => {
         expect(res.body.supportedCommands).toEqual(Object.keys(require('../../src/csharp_test_service').DOTNET_COMMANDS));
     });
 
-    test('custom projectPath is forwarded to executeCommand', async () => {
+    test('a workspace-relative projectPath is forwarded to executeCommand', async () => {
         mockExec({ stdout: 'OK', stderr: '', error: null });
 
         const res = await request(app)
             .post('/run-command')
-            .send({ command: 'build', projectPath: '/custom/project' });
+            .send({ command: 'build', projectPath: 'job-42' });
 
         expect(res.status).toBe(200);
-        // Verify cwd was set to the custom path
+        // Relative to TEST_WORKSPACE (/app/test_workspace), never an arbitrary dir
         const execCall = execFile.mock.calls[0];
-        expect(execCall[2].cwd).toBe('/custom/project');
+        expect(execCall[2].cwd).toBe('/app/test_workspace/job-42');
+    });
+
+    test('a projectPath that escapes the workspace is refused', async () => {
+        for (const projectPath of ['/custom/project', '../../etc']) {
+            const res = await request(app)
+                .post('/run-command')
+                .send({ command: 'build', projectPath });
+
+            expect(res.status).toBe(400);
+            expect(res.body.error).toContain('inside the service workspace');
+        }
+        expect(execFile).not.toHaveBeenCalled();
+    });
+
+    test('an argument that is not shaped like a CLI flag is refused', async () => {
+        const res = await request(app)
+            .post('/run-command')
+            .send({ command: 'build', arguments: ['--no-restore; rm -rf /'] });
+
+        expect(res.status).toBe(400);
+        expect(res.body.error).toContain('Unsupported argument');
+        expect(execFile).not.toHaveBeenCalled();
     });
 
     test('command failure returns success:false with stderr', async () => {

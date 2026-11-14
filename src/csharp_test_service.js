@@ -1197,25 +1197,49 @@ app.post('/run-command', async (req, res) => {
             });
         }
         
-        if (!DOTNET_COMMANDS[command] && !command.startsWith('dotnet ')) {
+        // Only the fixed map is executable. The old contract also accepted a raw
+        // "dotnet ..." string, which made the PROCESS NAME itself request-controlled
+        // — command injection by construction, whatever spawn API is used.
+        const baseCommand = DOTNET_COMMANDS[command];
+        if (!baseCommand) {
             return res.status(400).json({
                 error: `Unsupported command: ${command}`,
                 supportedCommands: Object.keys(DOTNET_COMMANDS)
             });
         }
-        
-        const actualCommand = DOTNET_COMMANDS[command] || command;
-        // Parse the command into an argv vector and append the caller's arguments
-        // as SEPARATE elements. execFile never invokes a shell, so an argument
-        // containing `;`, `$()` or backticks reaches `dotnet` as literal text
-        // rather than being interpreted as a second command.
-        const argv = actualCommand.trim().split(/\s+/);
+
+        // Each caller argument becomes ONE literal argv element (execFile never
+        // invokes a shell), and anything not shaped like a CLI flag is rejected
+        // outright rather than passed through.
+        const SAFE_ARGUMENT = /^[A-Za-z0-9_.:/=+-]+$/;
+        const argv = baseCommand.split(' ');
         for (const arg of cmdArgs) {
-            argv.push(String(arg));
+            const value = String(arg);
+            if (!SAFE_ARGUMENT.test(value)) {
+                return res.status(400).json({
+                    error: `Unsupported argument: ${value}`,
+                    supportedCommands: Object.keys(DOTNET_COMMANDS)
+                });
+            }
+            argv.push(value);
         }
         const fullCommand = argv.join(' ');
 
-        const workingDir = projectPath || TEST_WORKSPACE;
+        // projectPath becomes the child process's cwd, so it must resolve inside
+        // the service workspace. An absolute path or ../ escape is refused rather
+        // than running dotnet in a directory the caller chose.
+        const workspace = path.resolve(TEST_WORKSPACE);
+        const workingDir = projectPath
+            ? path.resolve(workspace, String(projectPath))
+            : workspace;
+        if (workingDir !== workspace && !workingDir.startsWith(workspace + path.sep)) {
+            return res.status(400).json({
+                error: 'projectPath must be inside the service workspace',
+                workspace,
+                supportedCommands: Object.keys(DOTNET_COMMANDS)
+            });
+        }
+
         const result = await executeCommand(argv, { cwd: workingDir });
         
         res.json({
