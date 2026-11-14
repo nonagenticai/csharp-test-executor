@@ -1,0 +1,21 @@
+{
+  "name": "csharp-test-executor",
+  "version": "1.0.0",
+  "description": "Executes C# compilation, unit tests, coverage, and security scans via dotnet CLI",
+  "main": "csharp_test_service.js",
+  "scripts": {
+    "start": "node csharp_test_service.js",
+    "test": "jest --coverage --verbose --rootDir=.."
+  },
+  "dependencies": {
+    "express": "^5.2.1"
+  },
+  "devDependencies": {
+    "jest": "^30.3.0",
+    "supertest": "^7.1.0"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "license": "Apache-2.0"
+}
