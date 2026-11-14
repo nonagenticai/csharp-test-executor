@@ -6,7 +6,7 @@ jest.mock('child_process', () => {
     const original = jest.requireActual('child_process');
     return {
         ...original,
-        exec: jest.fn()
+        execFile: jest.fn()
     };
 });
 
@@ -27,12 +27,12 @@ jest.mock('fs', () => {
     };
 });
 
-const { exec } = require('child_process');
+const { execFile } = require('child_process');
 const { app, DOTNET_COMMANDS } = require('../../src/csharp_test_service');
 
 function mockExecSequence(results) {
     let callIndex = 0;
-    exec.mockImplementation((cmd, opts, cb) => {
+    execFile.mockImplementation((file, args, opts, cb) => {
         const result = callIndex < results.length
             ? results[callIndex]
             : { stdout: '', stderr: '', error: null };
@@ -70,7 +70,7 @@ describe('POST /validate input contract', () => {
         expect(res.body.errors[0]).toContain('object');
         expect(res.body.output).toBe('');
         expect(res.body.validationId).toBeDefined();
-        expect(exec).not.toHaveBeenCalled();
+        expect(execFile).not.toHaveBeenCalled();
     });
 
     test('array code is reported as "array", not "object"', async () => {
@@ -81,7 +81,7 @@ describe('POST /validate input contract', () => {
         expect(res.status).toBe(400);
         expect(res.body.errors[0]).toContain('array');
         expect(res.body.errors[0]).not.toContain('object');
-        expect(exec).not.toHaveBeenCalled();
+        expect(execFile).not.toHaveBeenCalled();
     });
 
     test('numeric code returns 400 reporting number', async () => {
@@ -91,7 +91,7 @@ describe('POST /validate input contract', () => {
 
         expect(res.status).toBe(400);
         expect(res.body.errors[0]).toContain('number');
-        expect(exec).not.toHaveBeenCalled();
+        expect(execFile).not.toHaveBeenCalled();
     });
 
     // The null/undefined branch predates the type guard and other tests depend on
@@ -127,9 +127,9 @@ describe('POST /validate input contract', () => {
 
         expect(res.status).toBe(200);
         expect(res.body.valid).toBe(true);
-        expect(exec).toHaveBeenCalledTimes(2);
-        expect(exec.mock.calls[0][0]).toContain('dotnet new');
-        expect(exec.mock.calls[1][0]).toContain('dotnet build');
+        expect(execFile).toHaveBeenCalledTimes(2);
+        expect([execFile.mock.calls[0][0], ...execFile.mock.calls[0][1]].join(' ')).toContain('dotnet new');
+        expect([execFile.mock.calls[1][0], ...execFile.mock.calls[1][1]].join(' ')).toContain('dotnet build');
     });
 });
 
@@ -149,7 +149,7 @@ describe('POST /run-command input contract', () => {
         expect(res.body.error).toContain(label);
         expect(res.body.supportedCommands).toEqual(Object.keys(DOTNET_COMMANDS));
         // The load-bearing assertion: nothing was handed to exec.
-        expect(exec).not.toHaveBeenCalled();
+        expect(execFile).not.toHaveBeenCalled();
     });
 
     test('null command returns 400 and runs no shell command', async () => {
@@ -159,7 +159,7 @@ describe('POST /run-command input contract', () => {
 
         expect(res.status).toBe(400);
         expect(res.body.error).toContain("'command'");
-        expect(exec).not.toHaveBeenCalled();
+        expect(execFile).not.toHaveBeenCalled();
     });
 
     test('unsupported string command still returns the original 400 shape', async () => {
@@ -169,19 +169,17 @@ describe('POST /run-command input contract', () => {
 
         expect(res.status).toBe(400);
         expect(res.body.error).toContain('Unsupported command');
-        expect(exec).not.toHaveBeenCalled();
+        expect(execFile).not.toHaveBeenCalled();
     });
 
-    test('valid raw dotnet command still executes', async () => {
-        mockExecSequence([{ stdout: '8.0.100', stderr: '', error: null }]);
-
+    test('a raw dotnet command string is refused, not executed', async () => {
         const res = await request(app)
             .post('/run-command')
             .send({ command: 'dotnet --version' });
 
-        expect(res.status).toBe(200);
-        expect(res.body.command).toBe('dotnet --version');
-        expect(exec).toHaveBeenCalledTimes(1);
+        expect(res.status).toBe(400);
+        expect(res.body.error).toContain('Unsupported command');
+        expect(execFile).not.toHaveBeenCalled();
     });
 });
 
@@ -194,7 +192,7 @@ describe('POST /execute probe path', () => {
         expect(res.status).toBe(200);
         expect(res.body.skipped).toBe(true);
         expect(res.body.compilation).toBeNull();
-        expect(exec).not.toHaveBeenCalled();
+        expect(execFile).not.toHaveBeenCalled();
     });
 
     // CHANGED: this used to send `testCode: '// t'` and assert the probe
@@ -222,7 +220,7 @@ describe('POST /execute probe path', () => {
             .send({ code: '// test', testCode: '// t' });
 
         expect(res.body.noTestsRun).toBeUndefined();
-        expect(exec).toHaveBeenCalled();
+        expect(execFile).toHaveBeenCalled();
     });
 
     test('object code is NOT rejected by /execute — it is a valid source map there', async () => {
@@ -239,6 +237,6 @@ describe('POST /execute probe path', () => {
             });
 
         expect(res.status).not.toBe(400);
-        expect(exec).toHaveBeenCalled();
+        expect(execFile).toHaveBeenCalled();
     });
 });

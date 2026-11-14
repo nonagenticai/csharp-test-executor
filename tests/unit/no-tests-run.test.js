@@ -17,7 +17,7 @@ jest.mock('child_process', () => {
     const original = jest.requireActual('child_process');
     return {
         ...original,
-        exec: jest.fn()
+        execFile: jest.fn()
     };
 });
 
@@ -37,12 +37,12 @@ jest.mock('fs', () => {
     };
 });
 
-const { exec } = require('child_process');
+const { execFile } = require('child_process');
 const { app } = require('../../src/csharp_test_service');
 
 function mockExecSequence(results) {
     let callIndex = 0;
-    exec.mockImplementation((cmd, opts, cb) => {
+    execFile.mockImplementation((file, args, opts, cb) => {
         const result = callIndex < results.length
             ? results[callIndex]
             : { stdout: '', stderr: '', error: null };
@@ -200,7 +200,7 @@ describe('no_tests_run distinguishes zero-collection from failure', () => {
         expect(res.body.compilation).toBeNull();
         expect(res.body.no_tests_run).toBe(false);
         expect(res.body.success).toBe(false);
-        expect(exec.mock.calls.some((c) => c[0].startsWith('dotnet test'))).toBe(false);
+        expect(execFile.mock.calls.some((c) => [c[0], ...c[1]].join(' ').startsWith('dotnet test'))).toBe(false);
     });
 
     test('build failure -> no_tests_run false and present', async () => {
@@ -215,7 +215,7 @@ describe('no_tests_run distinguishes zero-collection from failure', () => {
         expect(res.body.compilation.success).toBe(false);
         expect(res.body.no_tests_run).toBe(false);
         expect(res.body.success).toBe(false);
-        expect(exec.mock.calls.some((c) => c[0].startsWith('dotnet test'))).toBe(false);
+        expect(execFile.mock.calls.some((c) => [c[0], ...c[1]].join(' ').startsWith('dotnet test'))).toBe(false);
     });
 
     // A CRASHED test host is the case a naive `passed === 0 && failed === 0`
@@ -329,6 +329,6 @@ describe('both spellings agree on the probe fast path', () => {
         expect(res.body.noTestsRun).toBe(true);
         expect(res.body.no_tests_run).toBe(true);
         expect(res.body.success).toBe(false);
-        expect(exec).not.toHaveBeenCalled();
+        expect(execFile).not.toHaveBeenCalled();
     });
 });
