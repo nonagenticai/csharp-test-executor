@@ -154,6 +154,8 @@ Runs an arbitrary `dotnet` CLI command.
 | `EXECUTION_TIMEOUT` | `300` | Max seconds per shell command before SIGTERM. |
 | `TEST_WORKSPACE` | `/app/test_workspace` | Directory for ephemeral project scaffolds. |
 | `REPORTS_DIR` | `/app/reports` | Directory for report output (created but not actively used). |
+| `RATE_LIMIT_MAX` | `60` | Requests per client address per window across `/execute`, `/validate` and `/run-command` before the service returns `429`. |
+| `RATE_LIMIT_WINDOW_MS` | `60000` | Rate-limit window in milliseconds. |
 | `TEST_MODE` | -- | Set in docker-compose; no runtime effect currently. |
 
 ## Dependencies

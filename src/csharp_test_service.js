@@ -21,6 +21,7 @@ const {
     installGracefulShutdown,
 } = require('./common');
 const { execFile } = require('child_process');
+const { rateLimit } = require('express-rate-limit');
 const fs = require('fs').promises;
 const path = require('path');
 const crypto = require('crypto');
@@ -34,6 +35,33 @@ const PORT = process.env.PORT || 8090;
 const EXECUTION_TIMEOUT = parseInt(process.env.EXECUTION_TIMEOUT || '300') * 1000; // 5 minutes for .NET builds
 const TEST_WORKSPACE = process.env.TEST_WORKSPACE || '/app/test_workspace';
 const REPORTS_DIR = process.env.REPORTS_DIR || '/app/reports';
+
+// ── Rate limiting ───────────────────────────────────────────────────────────
+// /execute and /validate scaffold, write, build, test and delete a project on
+// disk, and /run-command runs the .NET CLI directly: each request is seconds to
+// minutes of CPU and scratch-disk churn. Without a cap, a caller that retries
+// in a loop can exhaust the executor — CodeQL js/missing-rate-limiting raised
+// both file-system routes. This is an in-process counter keyed on the caller's
+// address: the orchestrator is the only caller (tenantGuard), so there is one
+// meaningful bucket, and an external attacker cannot bypass it by rotating
+// addresses. Defaults: 60 requests per 60 s, overridable with RATE_LIMIT_MAX /
+// RATE_LIMIT_WINDOW_MS. Invalid overrides fall back to the default rather than
+// disabling the limit.
+function positiveIntFromEnv(name, fallback) {
+    const parsed = Number.parseInt(process.env[name], 10);
+    return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+const RATE_LIMIT_MAX = positiveIntFromEnv('RATE_LIMIT_MAX', 60);
+const RATE_LIMIT_WINDOW_MS = positiveIntFromEnv('RATE_LIMIT_WINDOW_MS', 60 * 1000);
+
+const expensiveRouteLimiter = rateLimit({
+    windowMs: RATE_LIMIT_WINDOW_MS,
+    limit: RATE_LIMIT_MAX,
+    standardHeaders: true, // RateLimit-Limit / -Remaining / -Reset on responses
+    legacyHeaders: false,
+    message: { error: 'Too many requests', detail: 'This executor is rate-limited.' },
+});
 
 // Initialize Express app with shared setup + orchestrator-only tenant guard
 const app = setupExpress({ jsonLimit: '50mb' });
@@ -311,6 +339,105 @@ function executeCommand(argv, options = {}) {
     });
 }
 
+// The ECMAScript `\s` set (WhiteSpace + LineTerminator), one code unit at a
+// time. Used by parseTestResultLine() below, which replaced a regular
+// expression CodeQL flagged as js/polynomial-redos.
+const WHITESPACE_CHARS = new Set([
+    ' ', '\t', '\n', '\v', '\f', '\r', '\u00a0', '\u1680', '\u2000', '\u2001',
+    '\u2002', '\u2003', '\u2004', '\u2005', '\u2006', '\u2007', '\u2008', '\u2009',
+    '\u200a', '\u2028', '\u2029', '\u202f', '\u205f', '\u3000', '\ufeff',
+]);
+
+const RESULT_STATUS_WORDS = ['Passed', 'Failed', 'Skipped'];
+
+// `.` (unlike `\s`) does not match line terminators, so the old regex's name
+// and duration groups could not span one. parseTestOutput splits on '\n', so
+// these can only appear mid-line as '\r' (CRLF echo) or the Unicode separators.
+const LINE_TERMINATORS = new Set(['\n', '\r', '\u2028', '\u2029']);
+
+function containsLineTerminator(text, start, end) {
+    for (let i = start; i < end; i += 1) {
+        if (LINE_TERMINATORS.has(text[i])) return true;
+    }
+    return false;
+}
+
+/**
+ * Parse one VSTest per-test result line — the linear-time equivalent of
+ *   /^\s*(Passed|Failed|Skipped)\s+(.+?)\s+\[(.+?)\]/
+ *
+ * That regex was js/polynomial-redos: `\s+(.+?)\s+\[` runs the lazy group's
+ * expansion and the trailing `\s+` from every possible split point, so an
+ * adversarial line (again: this parser consumes untrusted dotnet output,
+ * including the project under test's own Console.WriteLine echo) like
+ * `Passed ` + `a` * n with no closing bracket is quadratic. This scans the
+ * line once, left to right: indent, status word, its whitespace gap, the first
+ * whitespace run directly followed by '[', then the first ']' at least one
+ * character later. Returns { status, name, duration } or null.
+ *
+ * One deliberate divergence: the old regex could backtrack the leading `\s+`
+ * to produce a name consisting only of whitespace (e.g. `Passed   [x]`), which
+ * `.trim()` then stored as an empty test name. Such a line is not a test
+ * result and is rejected here.
+ */
+function parseTestResultLine(line) {
+    let index = 0;
+    while (index < line.length && WHITESPACE_CHARS.has(line[index])) index += 1;
+
+    let status = null;
+    for (const word of RESULT_STATUS_WORDS) {
+        if (line.startsWith(word, index)) {
+            status = word;
+            index += word.length;
+            break;
+        }
+    }
+    if (status === null) return null;
+
+    const gapStart = index;
+    while (index < line.length && WHITESPACE_CHARS.has(line[index])) index += 1;
+    if (index === gapStart) return null; // `\s+` after the status word
+
+    // The name runs up to the first whitespace run that is followed by '['.
+    const nameStart = index;
+    let nameEnd = -1;
+    let bracketStart = -1;
+    while (index < line.length) {
+        if (!WHITESPACE_CHARS.has(line[index])) {
+            if (LINE_TERMINATORS.has(line[index])) return null; // `.` cannot cross it
+            index += 1;
+            continue;
+        }
+        let runEnd = index;
+        while (runEnd < line.length && WHITESPACE_CHARS.has(line[runEnd])) runEnd += 1;
+        if (runEnd < line.length && line[runEnd] === '[') {
+            // This run is the `\s+` before '['; it may itself contain a line
+            // terminator, which `\s` allows.
+            nameEnd = index;
+            bracketStart = runEnd;
+            break;
+        }
+        // Not followed by '['. To reach a later run the name would have to
+        // span this one, and a line terminator inside it blocks `.` for good.
+        if (containsLineTerminator(line, index, runEnd)) return null;
+        index = runEnd;
+    }
+    if (nameEnd === -1) return null;
+
+    // `(.+?)` before ']' needs at least one character and cannot cross a line
+    // terminator; the first ']' is the only candidate, exactly as before.
+    const durationStart = bracketStart + 1;
+    const close = line.indexOf(']', durationStart + 1);
+    if (close === -1) return null;
+    if (containsLineTerminator(line, durationStart, close)) return null;
+
+    return {
+        status,
+        name: line.slice(nameStart, nameEnd).trim(),
+        duration: line.slice(durationStart, close),
+    };
+}
+
 /**
  * Parse dotnet test output
  */
@@ -417,13 +544,13 @@ function parseTestOutput(output) {
         }
 
         // Parse individual test results
-        const testMatch = line.match(/^\s*(Passed|Failed|Skipped)\s+(.+?)\s+\[(.+?)\]/);
+        const testMatch = parseTestResultLine(line);
         if (testMatch) {
             results.testResults.push({
-                status: testMatch[1].toLowerCase(),
-                name: testMatch[2].trim(),
-                duration: testMatch[3],
-                success: testMatch[1] === 'Passed'
+                status: testMatch.status.toLowerCase(),
+                name: testMatch.name,
+                duration: testMatch.duration,
+                success: testMatch.status === 'Passed'
             });
         }
         
@@ -445,28 +572,106 @@ function parseTestOutput(output) {
     return results;
 }
 
+// A Cobertura element is a single XML tag; 64 KiB is orders of magnitude above
+// anything coverlet emits. Capping the slice keeps a pathological tag from
+// forcing a whole-input copy while still scanning every realistic tag once.
+const MAX_COVERAGE_TAG_LENGTH = 64 * 1024;
+
+const DIGITS_ONLY = /^\d+$/;
+
+/**
+ * Find `name="value"` inside `text`, starting at `from`. Returns
+ * { value, end } (end is just past the closing quote) or null.
+ */
+function readQuotedAttribute(text, name, from) {
+    const key = `${name}="`;
+    const keyAt = text.indexOf(key, from);
+    if (keyAt === -1) return null;
+    const valueStart = keyAt + key.length;
+    const closeQuote = text.indexOf('"', valueStart);
+    if (closeQuote === -1) return null;
+    return { value: text.slice(valueStart, closeQuote), end: closeQuote + 1 };
+}
+
+/**
+ * Linear-time equivalent of `/<literal[^>]*name="value"[^>]*.../`.
+ *
+ * The three coverage patterns this replaces were js/polynomial-redos: two
+ * `[^>]*` quantifiers separated only by a literal make the engine rescan the
+ * same tag from every split point, so adversarial coverage XML (input the
+ * tested project can influence) is quadratic. Here each candidate tag is
+ * sliced and scanned once, left to right, with indexOf only. A candidate that
+ * fails is skipped by advancing past its closing '>': re-trying later
+ * `<literal` occurrences inside that same tag would rescan the same bytes once
+ * per occurrence, which is exactly the polynomial behaviour being removed.
+ * Cobertura emits each attribute exactly once per element, so the first tag
+ * carrying the fields in order is the intended match.
+ *
+ * `literal` must include any fixed text the original regex had (e.g. the
+ * trailing space and `type="LINE"` of the counter patterns). `attributes` is a
+ * list of { name, accept? }; `accept` validates the captured value (used to
+ * enforce `(\d+)`). Returns the captured values in order, or null.
+ */
+function firstTagAttributes(xml, literal, attributes) {
+    let from = 0;
+    for (;;) {
+        const start = xml.indexOf(literal, from);
+        if (start === -1) return null;
+        const close = xml.indexOf('>', start);
+        const end = close === -1 ? xml.length : close;
+
+        if (end - start <= MAX_COVERAGE_TAG_LENGTH) {
+            const tag = xml.slice(start, end);
+            const values = [];
+            let after = literal.length;
+            let matched = true;
+            for (const { name, accept } of attributes) {
+                const attribute = readQuotedAttribute(tag, name, after);
+                if (attribute === null || (accept && !accept(attribute.value))) {
+                    matched = false;
+                    break;
+                }
+                values.push(attribute.value);
+                after = attribute.end;
+            }
+            if (matched) return values;
+        }
+
+        from = end + 1;
+    }
+}
+
 /**
  * Parse coverage results from XML
  */
 function parseCoverageResults(xmlContent) {
     if (!xmlContent) return null;
-    
+
     try {
         // Simple XML parsing for coverage metrics
-        const summaryMatch = xmlContent.match(/<coverage[^>]*line-rate="([^"]*)"[^>]*branch-rate="([^"]*)"/);
-        const lineMatch = xmlContent.match(/<counter type="LINE"[^>]*covered="(\d+)"[^>]*missed="(\d+)"/);
-        const branchMatch = xmlContent.match(/<counter type="BRANCH"[^>]*covered="(\d+)"[^>]*missed="(\d+)"/);
+        const summaryMatch = firstTagAttributes(xmlContent, '<coverage', [
+            { name: 'line-rate' },
+            { name: 'branch-rate' },
+        ]);
+        const lineMatch = firstTagAttributes(xmlContent, '<counter type="LINE"', [
+            { name: 'covered', accept: (value) => DIGITS_ONLY.test(value) },
+            { name: 'missed', accept: (value) => DIGITS_ONLY.test(value) },
+        ]);
+        const branchMatch = firstTagAttributes(xmlContent, '<counter type="BRANCH"', [
+            { name: 'covered', accept: (value) => DIGITS_ONLY.test(value) },
+            { name: 'missed', accept: (value) => DIGITS_ONLY.test(value) },
+        ]);
         
         const coverage = {};
         
         if (summaryMatch) {
-            coverage.lineRate = (parseFloat(summaryMatch[1]) * 100).toFixed(2);
-            coverage.branchRate = (parseFloat(summaryMatch[2]) * 100).toFixed(2);
+            coverage.lineRate = (parseFloat(summaryMatch[0]) * 100).toFixed(2);
+            coverage.branchRate = (parseFloat(summaryMatch[1]) * 100).toFixed(2);
         }
-        
+
         if (lineMatch) {
-            const covered = parseInt(lineMatch[1]);
-            const missed = parseInt(lineMatch[2]);
+            const covered = parseInt(lineMatch[0]);
+            const missed = parseInt(lineMatch[1]);
             coverage.lines = {
                 covered,
                 missed,
@@ -476,8 +681,8 @@ function parseCoverageResults(xmlContent) {
         }
         
         if (branchMatch) {
-            const covered = parseInt(branchMatch[1]);
-            const missed = parseInt(branchMatch[2]);
+            const covered = parseInt(branchMatch[0]);
+            const missed = parseInt(branchMatch[1]);
             coverage.branches = {
                 covered,
                 missed,
@@ -550,7 +755,7 @@ app.get('/health', (req, res) => {
 /**
  * Execute C# tests
  */
-app.post('/execute', async (req, res) => {
+app.post('/execute', expensiveRouteLimiter, async (req, res) => {
     const executionId = crypto.randomUUID();
     const startTime = Date.now();
     
@@ -1083,7 +1288,7 @@ app.get('/frameworks', (req, res) => {
 /**
  * Validate C# code syntax
  */
-app.post('/validate', async (req, res) => {
+app.post('/validate', expensiveRouteLimiter, async (req, res) => {
     const validationId = crypto.randomUUID();
     
     try {
@@ -1177,7 +1382,7 @@ app.post('/validate', async (req, res) => {
 /**
  * Run specific dotnet command
  */
-app.post('/run-command', async (req, res) => {
+app.post('/run-command', expensiveRouteLimiter, async (req, res) => {
     const commandId = crypto.randomUUID();
     
     try {
